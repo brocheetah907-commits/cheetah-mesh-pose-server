@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheetah Mesh</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+    max-width: 460px;
+    margin: 20px auto;
+    padding: 0 14px;
+    background: #181818;
+    color: #e6e6e6;
+  }
+  h3 {
+    color: #e8612a;
+    margin: 6px 0 14px;
+    font-size: 17px;
+  }
+  .panel {
+    background: #222222;
+    border: 1px solid #333333;
+    border-radius: 4px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  input[type=file] {
+    width: 100%;
+    color: #e6e6e6;
+    padding: 6px 0;
+    font-size: 13px;
+  }
+  button {
+    width: 100%;
+    padding: 10px;
+    font-size: 14px;
+    border-radius: 4px;
+    border: 1px solid #404040;
+    background: #2e2e2e;
+    color: #e6e6e6;
+    margin-top: 10px;
+  }
+  button:active { background: #3d3d3d; border-color: #595959; }
+  button:disabled { background: #262626; border-color: #333333; color: #666; }
+  button.primary {
+    background: #e8612a;
+    border-color: #ff8033;
+    color: #0d0d0d;
+    font-weight: bold;
+  }
+  button.primary:disabled { background: #5c3018; border-color: #5c3018; color: #888; }
+  #status { font-size: 13px; color: #b0b0b0; min-height: 18px; margin-top: 10px; }
+  #status.ok  { color: #7cc47f; }
+  #status.err { color: #e05a5a; }
+  #bar-wrap {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 3px;
+    overflow: hidden;
+    height: 8px;
+    margin-top: 8px;
+    display: none;
+  }
+  #bar { background: #e8612a; height: 100%; width: 0%; }
+  textarea {
+    width: 100%;
+    height: 70px;
+    font-family: monospace;
+    font-size: 10px;
+    margin-top: 10px;
+    background: #1f1f1f;
+    color: #999;
+    border: 1px solid #333;
+    border-radius: 4px;
+    display: none;
+  }
+  #copy-fallback { display: none; }
+</style>
+</head>
+<body>
+
+<h3>🐆 Cheetah Mesh</h3>
+
+<div class="panel">
+  <input type="file" id="video-input" accept="video/*">
+  <button id="process-btn" class="primary" disabled>ابدأ</button>
+  <div id="status">اختار فيديو</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
+  <textarea id="result-box" readonly></textarea>
+  <button id="copy-fallback">نسخ يدوي</button>
+</div>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+// نفس الـ 33 landmark بنفس الترتيب اللي VideoToAnimRetarget.gd بيتوقعه.
+const LANDMARK_NAMES = [
+  "NOSE", "LEFT_EYE_INNER", "LEFT_EYE", "LEFT_EYE_OUTER",
+  "RIGHT_EYE_INNER", "RIGHT_EYE", "RIGHT_EYE_OUTER",
+  "LEFT_EAR", "RIGHT_EAR", "MOUTH_LEFT", "MOUTH_RIGHT",
+  "LEFT_SHOULDER", "RIGHT_SHOULDER", "LEFT_ELBOW", "RIGHT_ELBOW",
+  "LEFT_WRIST", "RIGHT_WRIST", "LEFT_PINKY", "RIGHT_PINKY",
+  "LEFT_INDEX", "RIGHT_INDEX", "LEFT_THUMB", "RIGHT_THUMB",
+  "LEFT_HIP", "RIGHT_HIP", "LEFT_KNEE", "RIGHT_KNEE",
+  "LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL",
+  "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX",
+];
+
+// ⚠️ قابلين للتعديل.
+const TARGET_FPS = 12;
+const MAX_SECONDS = 10;
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+const videoInput   = document.getElementById("video-input");
+const processBtn   = document.getElementById("process-btn");
+const statusEl     = document.getElementById("status");
+const barWrap      = document.getElementById("bar-wrap");
+const bar          = document.getElementById("bar");
+const resultBox    = document.getElementById("result-box");
+const copyFallback = document.getElementById("copy-fallback");
+
+let selectedFile = null;
+let poseLandmarker = null;
+
+function setStatus(text, kind) {
+  statusEl.textContent = text;
+  statusEl.className = kind || "";
+}
+
+videoInput.addEventListener("change", () => {
+  selectedFile = videoInput.files[0] || null;
+  processBtn.disabled = !selectedFile;
+  setStatus(selectedFile ? "جاهز" : "اختار فيديو");
+});
+
+async function ensureLandmarker() {
+  if (poseLandmarker) return poseLandmarker;
+  setStatus("بيجهّز…");
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODEL_URL },
+    runningMode: "VIDEO",
+    numPoses: 1,
+  });
+  return poseLandmarker;
+}
+
+function landmarksToDict(worldLandmarks) {
+  const out = {};
+  for (let i = 0; i < LANDMARK_NAMES.length && i < worldLandmarks.length; i++) {
+    const lm = worldLandmarks[i];
+    out[LANDMARK_NAMES[i]] = {
+      x: Math.round(lm.x * 1e5) / 1e5,
+      y: Math.round(lm.y * 1e5) / 1e5,
+      z: Math.round(lm.z * 1e5) / 1e5,
+      visibility: Math.round((lm.visibility ?? 0) * 1e3) / 1e3,
+    };
+  }
+  return out;
+}
+
+function seekTo(video, t) {
+  return new Promise((resolve) => {
+    function onSeeked() {
+      video.removeEventListener("seeked", onSeeked);
+      resolve();
+    }
+    video.addEventListener("seeked", onSeeked);
+    video.currentTime = t;
+  });
+}
+
+async function processVideo(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+
+  await new Promise((resolve, reject) => {
+    video.addEventListener("loadedmetadata", resolve, { once: true });
+    video.addEventListener("error", () => reject(new Error("cannot_open_video")), { once: true });
+  });
+
+  const landmarker = await ensureLandmarker();
+
+  const duration = Math.min(video.duration || 0, MAX_SECONDS);
+  const step = 1 / TARGET_FPS;
+  const totalFrames = Math.max(1, Math.floor(duration / step));
+
+  const frames = [];
+  let detectedCount = 0;
+
+  for (let i = 0; i < totalFrames; i++) {
+    const t = i * step;
+    await seekTo(video, t);
+    const result = landmarker.detectForVideo(video, performance.now());
+    if (result.worldLandmarks && result.worldLandmarks.length > 0) {
+      frames.push(landmarksToDict(result.worldLandmarks[0]));
+      detectedCount++;
+    } else {
+      frames.push({});
+    }
+    bar.style.width = Math.round(((i + 1) / totalFrames) * 100) + "%";
+    setStatus("بيتحلل… " + Math.round(((i + 1) / totalFrames) * 100) + "٪");
+  }
+
+  URL.revokeObjectURL(url);
+
+  if (detectedCount === 0) {
+    return { error: "no_pose_detected" };
+  }
+
+  return {
+    fps: TARGET_FPS,
+    frame_count: frames.length,
+    detected_frame_count: detectedCount,
+    truncated: (video.duration || 0) > MAX_SECONDS,
+    frames: frames,
+  };
+}
+
+async function copyResult(jsonText) {
+  try {
+    await navigator.clipboard.writeText(jsonText);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// رسائل نظيفة للمستخدم — مفيش أكواد أخطاء خام على الشاشة.
+const ERROR_MESSAGES = {
+  no_pose_detected: "مفيش حد ظاهر في الفيديو ده — جرّب فيديو تاني",
+  cannot_open_video: "الفيديو ده مش شغال — جرّب ملف تاني",
+};
+
+processBtn.addEventListener("click", async () => {
+  if (!selectedFile) return;
+  processBtn.disabled = true;
+  videoInput.disabled = true;
+  barWrap.style.display = "block";
+  resultBox.style.display = "none";
+  copyFallback.style.display = "none";
+
+  try {
+    const result = await processVideo(selectedFile);
+
+    if (result.error) {
+      setStatus(ERROR_MESSAGES[result.error] || "حصل خطأ — جرّب تاني", "err");
+    } else {
+      const jsonText = JSON.stringify(result);
+      const copied = await copyResult(jsonText);
+      resultBox.value = jsonText;
+      if (copied) {
+        setStatus("✓ اتنسخت — ارجع للتطبيق ودوس لصق", "ok");
+      } else {
+        resultBox.style.display = "block";
+        copyFallback.style.display = "block";
+        setStatus("دوس نسخ يدوي تحت");
+      }
+    }
+  } catch (err) {
+    setStatus("حصل خطأ — جرّب تاني", "err");
+  } finally {
+    processBtn.disabled = false;
+    videoInput.disabled = false;
+  }
+});
+
+copyFallback.addEventListener("click", async () => {
+  const ok = await copyResult(resultBox.value);
+  setStatus(ok ? "✓ اتنسخت" : "اختار النص وانسخه يدوي", ok ? "ok" : "err");
+});
+</script>
+</body>
+</html>
