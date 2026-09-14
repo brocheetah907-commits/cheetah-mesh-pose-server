@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🐆 Cheetah Mesh — معالجة الفيديو</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+    max-width: 480px;
+    margin: 24px auto;
+    padding: 0 16px;
+    color: #222;
+    background: #fafafa;
+  }
+  h3 { margin-bottom: 4px; }
+  .sub { color: #777; font-size: 14px; margin-top: 0; }
+  .card {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 16px;
+    margin: 14px 0;
+  }
+  input[type=file] { width: 100%; padding: 10px 0; }
+  button {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    border-radius: 10px;
+    border: none;
+    background: #2a7de1;
+    color: #fff;
+    margin-top: 10px;
+  }
+  button:disabled { background: #b8c8dc; }
+  #status { font-size: 15px; min-height: 24px; }
+  #bar-wrap {
+    background: #eee;
+    border-radius: 8px;
+    overflow: hidden;
+    height: 10px;
+    margin-top: 8px;
+    display: none;
+  }
+  #bar { background: #2a7de1; height: 100%; width: 0%; transition: width .15s; }
+  .done { color: #1a8a3a; font-weight: bold; }
+  .err { color: #c62828; font-weight: bold; }
+  textarea {
+    width: 100%;
+    height: 90px;
+    font-family: monospace;
+    font-size: 11px;
+    margin-top: 10px;
+    display: none;
+  }
+  #copy-fallback { display: none; background: #555; }
+</style>
+</head>
+<body>
+
+<h3>🐆 Cheetah Mesh</h3>
+<p class="sub">معالجة الفيديو لـ Video to Animation — بتشتغل جوه المتصفح، صفر سيرفر</p>
+
+<div class="card">
+  <div id="pre-select">
+    <input type="file" id="video-input" accept="video/*">
+    <button id="process-btn" disabled>ابدأ المعالجة</button>
+  </div>
+
+  <div id="status">اختار فيديو للبدء</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
+
+  <textarea id="result-box" readonly></textarea>
+  <button id="copy-fallback">📋 نسخ يدوي (احتياطي)</button>
+</div>
+
+<p class="sub">
+  بعد ما تشوف "✓ اتنسخت النتيجة" — ارجع لتطبيق Cheetah Mesh ودوس "لصق النتيجة".
+</p>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+// نفس الـ 33 landmark بنفس الترتيب اللي VideoToAnimRetarget.gd
+// و LANDMARK_NAMES في السيرفرات السابقة كانوا بيستخدموه — لازم يفضلوا
+// متطابقين. ترتيب MediaPipe Pose القياسي، تابت مهما كانت النسخة.
+const LANDMARK_NAMES = [
+  "NOSE", "LEFT_EYE_INNER", "LEFT_EYE", "LEFT_EYE_OUTER",
+  "RIGHT_EYE_INNER", "RIGHT_EYE", "RIGHT_EYE_OUTER",
+  "LEFT_EAR", "RIGHT_EAR", "MOUTH_LEFT", "MOUTH_RIGHT",
+  "LEFT_SHOULDER", "RIGHT_SHOULDER", "LEFT_ELBOW", "RIGHT_ELBOW",
+  "LEFT_WRIST", "RIGHT_WRIST", "LEFT_PINKY", "RIGHT_PINKY",
+  "LEFT_INDEX", "RIGHT_INDEX", "LEFT_THUMB", "RIGHT_THUMB",
+  "LEFT_HIP", "RIGHT_HIP", "LEFT_KNEE", "RIGHT_KNEE",
+  "LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL",
+  "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX",
+];
+
+// ⚠️ قيم قابلة للتعديل — نقطة بداية بس، جرّب وعدّل لو احتجت.
+const TARGET_FPS = 12;     // معدل أخذ العينات اللي إحنا بنحدده (مش fps
+                            // الفيديو الأصلي — المتصفحات مفيهاش طريقة
+                            // موحّدة تجيب بيها fps الأصلي بدقة)
+const MAX_SECONDS = 10;    // أقصى مدة فيديو بنعالجها فعليًا
+
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+const videoInput   = document.getElementById("video-input");
+const processBtn   = document.getElementById("process-btn");
+const statusEl     = document.getElementById("status");
+const barWrap      = document.getElementById("bar-wrap");
+const bar          = document.getElementById("bar");
+const resultBox    = document.getElementById("result-box");
+const copyFallback = document.getElementById("copy-fallback");
+
+let selectedFile = null;
+let poseLandmarker = null;
+
+videoInput.addEventListener("change", () => {
+  selectedFile = videoInput.files[0] || null;
+  processBtn.disabled = !selectedFile;
+  statusEl.textContent = selectedFile ? "جاهز — دوس ابدأ المعالجة" : "اختار فيديو للبدء";
+});
+
+async function ensureLandmarker() {
+  if (poseLandmarker) return poseLandmarker;
+  statusEl.textContent = "بيحمّل نموذج MediaPipe (أول مرة بس)…";
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODEL_URL },
+    runningMode: "VIDEO",
+    numPoses: 1,
+  });
+  return poseLandmarker;
+}
+
+function landmarksToDict(worldLandmarks) {
+  const out = {};
+  for (let i = 0; i < LANDMARK_NAMES.length && i < worldLandmarks.length; i++) {
+    const lm = worldLandmarks[i];
+    out[LANDMARK_NAMES[i]] = {
+      x: Math.round(lm.x * 1e5) / 1e5,
+      y: Math.round(lm.y * 1e5) / 1e5,
+      z: Math.round(lm.z * 1e5) / 1e5,
+      visibility: Math.round((lm.visibility ?? 0) * 1e3) / 1e3,
+    };
+  }
+  return out;
+}
+
+function seekTo(video, t) {
+  return new Promise((resolve) => {
+    function onSeeked() {
+      video.removeEventListener("seeked", onSeeked);
+      resolve();
+    }
+    video.addEventListener("seeked", onSeeked);
+    video.currentTime = t;
+  });
+}
+
+async function processVideo(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+
+  await new Promise((resolve, reject) => {
+    video.addEventListener("loadedmetadata", resolve, { once: true });
+    video.addEventListener("error", () => reject(new Error("cannot_open_video")), { once: true });
+  });
+
+  const landmarker = await ensureLandmarker();
+
+  const duration = Math.min(video.duration || 0, MAX_SECONDS);
+  const step = 1 / TARGET_FPS;
+  const totalFrames = Math.max(1, Math.floor(duration / step));
+
+  const frames = [];
+  let detectedCount = 0;
+
+  for (let i = 0; i < totalFrames; i++) {
+    const t = i * step;
+    await seekTo(video, t);
+    const result = landmarker.detectForVideo(video, performance.now());
+    if (result.worldLandmarks && result.worldLandmarks.length > 0) {
+      frames.push(landmarksToDict(result.worldLandmarks[0]));
+      detectedCount++;
+    } else {
+      frames.push({});
+    }
+    const pct = Math.round(((i + 1) / totalFrames) * 100);
+    bar.style.width = pct + "%";
+    statusEl.textContent = `بيتحلل… فريم ${i + 1}/${totalFrames}`;
+  }
+
+  URL.revokeObjectURL(url);
+
+  if (detectedCount === 0) {
+    return { error: "no_pose_detected", message: "No person/pose was detected in this video." };
+  }
+
+  return {
+    fps: TARGET_FPS,
+    frame_count: frames.length,
+    detected_frame_count: detectedCount,
+    truncated: (video.duration || 0) > MAX_SECONDS,
+    frames: frames,
+  };
+}
+
+async function copyResult(jsonText) {
+  try {
+    await navigator.clipboard.writeText(jsonText);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+processBtn.addEventListener("click", async () => {
+  if (!selectedFile) return;
+  processBtn.disabled = true;
+  videoInput.disabled = true;
+  barWrap.style.display = "block";
+  resultBox.style.display = "none";
+  copyFallback.style.display = "none";
+
+  try {
+    const result = await processVideo(selectedFile);
+    const jsonText = JSON.stringify(result);
+    const copied = await copyResult(jsonText);
+
+    resultBox.value = jsonText;
+    resultBox.style.display = "block";
+
+    if (result.error) {
+      statusEl.innerHTML = `<span class="err">⚠ ${result.error} — اتنسخت رسالة الخطأ، جرّب فيديو تاني فيه شخص واضح</span>`;
+    } else if (copied) {
+      statusEl.innerHTML = `<span class="done">✓ اتنسخت النتيجة — ارجع لتطبيق Cheetah Mesh ودوس "لصق النتيجة"</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="err">النسخ التلقائي متعطل — دوس "نسخ يدوي" تحت</span>`;
+      copyFallback.style.display = "block";
+    }
+  } catch (err) {
+    statusEl.innerHTML = `<span class="err">⚠ حصل خطأ: ${err.message || err}</span>`;
+  } finally {
+    processBtn.disabled = false;
+    videoInput.disabled = false;
+  }
+});
+
+copyFallback.addEventListener("click", async () => {
+  const ok = await copyResult(resultBox.value);
+  statusEl.innerHTML = ok
+    ? `<span class="done">✓ اتنسخت النتيجة</span>`
+    : `<span class="err">مقدرش أنسخ تلقائي — اختار النص يدوي وانسخه (Select All / Copy)</span>`;
+});
+</script>
+</body>
+</html>
