@@ -132,6 +132,15 @@ const MAX_SECONDS = 10;
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+// ⚠️ إضافة (سبتمبر 2026 — Bug Report قسم 4.2/توصية 5): موديل منفصل لوضع
+// "صورة واحدة" (processPhoto) بس. لوضع الفيديو (frames كتير بسرعة) "lite"
+// منطقي، لكن صورة واحدة مفيهاش ضغط زمني حقيقي — "full" أدق (خصوصًا على
+// صور صعبة زي شخصية بعباءة/دروع في إضاءة غامقة)، والفرق في وقت التحميل/
+// التحليل لصورة واحدة مش ملحوظ عمليًا. poseLandmarkerImage (تحت) هي اللي
+// بتستخدم المتغيّر ده — poseLandmarker (الفيديو) لسه بتستخدم MODEL_URL
+// (lite) زي ما هي.
+const MODEL_URL_IMAGE =
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 
 const videoInput   = document.getElementById("video-input");
 const processBtn   = document.getElementById("process-btn");
@@ -192,8 +201,10 @@ async function ensureLandmarker() {
   return poseLandmarker;
 }
 
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة) — نفس المودل (MODEL_URL)
-// وminPoseDetectionConfidence/minPosePresenceConfidence الافتراضية بتاعة
+// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة) — موديل "full" منفصل
+// (MODEL_URL_IMAGE، راجع تعليقه فوق) بدل "lite" بتاعة الفيديو، لإن صورة
+// واحدة مفيهاش ضغط زمني يستاهل التضحية بالدقة. minPoseDetectionConfidence/
+// minPosePresenceConfidence لسه الافتراضية بتاعة
 // PoseLandmarker (0.5 لكل واحدة، قيمة المكتبة نفسها — قسم 3.5 من الخطة:
 // الـJS API مبيرجّعش overall confidence score منفصل عن الـlandmarks
 // نفسها، فالبوابة الفعلية "بشري ولا لأ" بتحصل في VideoToAnimAutoRig.gd
@@ -203,7 +214,7 @@ async function ensureLandmarkerImage() {
   photoSetStatus("بيجهّز…");
   const vision = await ensureVision();
   poseLandmarkerImage = await PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODEL_URL },
+    baseOptions: { modelAssetPath: MODEL_URL_IMAGE },
     runningMode: "IMAGE",
     numPoses: 1,
   });
