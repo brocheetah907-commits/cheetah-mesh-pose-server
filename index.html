@@ -76,7 +76,7 @@
     border-radius: 4px;
     display: none;
   }
-  #copy-fallback, #photo-copy-fallback { display: none; }
+  #copy-fallback { display: none; }
 </style>
 </head>
 <body>
@@ -91,23 +91,6 @@
   <div id="bar-wrap"><div id="bar"></div></div>
   <textarea id="result-box" readonly></textarea>
   <button id="copy-fallback">نسخ يدوي</button>
-</div>
-
-<!-- ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة، راجع
-     CheetahMesh_AutoRig_MediaPipe_Plan.md قسم 3.1). لوحة مستقلة تمامًا عن
-     لوحة الفيديو فوق — نفس الصفحة (تفصيل تنسيقي بسيط، قسم 3.1 من الخطة)،
-     بس PoseLandmarker instance منفصلة بـrunningMode: "IMAGE" (المزامن،
-     .detect() مش .detectForVideo()) واستدعاء result.landmarks (مساحة
-     الصورة 0.0-1.0) مش result.worldLandmarks (قسم 1 من الخطة: بنتجاهل
-     تقدير العمق التقريبي بتاع MediaPipe، وبنستخدم raycast على الميش
-     الحقيقي في جودوت بدل منه). -->
-<div class="panel">
-  <div style="font-size:13px;color:#999;margin-bottom:6px;">📸 صورة → Auto-Rig (هيكل عظمي)</div>
-  <input type="file" id="photo-input" accept="image/*">
-  <button id="photo-process-btn" class="primary" disabled>ابدأ</button>
-  <div id="photo-status">اختار صورة (سكرين-شوت من Cheetah Mesh)</div>
-  <textarea id="photo-result-box" readonly></textarea>
-  <button id="photo-copy-fallback">نسخ يدوي</button>
 </div>
 
 <script type="module">
@@ -132,16 +115,6 @@ const MAX_SECONDS = 10;
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
-// ⚠️ إضافة (سبتمبر 2026 — Bug Report قسم 4.2/توصية 5): موديل منفصل لوضع
-// "صورة واحدة" (processPhoto) بس. لوضع الفيديو (frames كتير بسرعة) "lite"
-// منطقي، لكن صورة واحدة مفيهاش ضغط زمني حقيقي — "full" أدق (خصوصًا على
-// صور صعبة زي شخصية بعباءة/دروع في إضاءة غامقة)، والفرق في وقت التحميل/
-// التحليل لصورة واحدة مش ملحوظ عمليًا. poseLandmarkerImage (تحت) هي اللي
-// بتستخدم المتغيّر ده — poseLandmarker (الفيديو) لسه بتستخدم MODEL_URL
-// (lite) زي ما هي.
-const MODEL_URL_IMAGE =
-  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
-
 const videoInput   = document.getElementById("video-input");
 const processBtn   = document.getElementById("process-btn");
 const statusEl     = document.getElementById("status");
@@ -150,24 +123,8 @@ const bar          = document.getElementById("bar");
 const resultBox    = document.getElementById("result-box");
 const copyFallback = document.getElementById("copy-fallback");
 
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة) — عناصر لوحة الصورة المستقلة.
-const photoInput       = document.getElementById("photo-input");
-const photoProcessBtn  = document.getElementById("photo-process-btn");
-const photoStatusEl    = document.getElementById("photo-status");
-const photoResultBox   = document.getElementById("photo-result-box");
-const photoCopyFallback = document.getElementById("photo-copy-fallback");
-
 let selectedFile = null;
-let selectedPhotoFile = null;
 let poseLandmarker = null;
-// instance منفصلة عن poseLandmarker فوق — MediaPipe محتاج runningMode
-// ثابت وقت createFromOptions، والتبديل بين "VIDEO" و"IMAGE" على نفس
-// الـinstance محتاج setOptions() غير متزامنة (await) لكل تبديل، اللي ممكن
-// يعمل race condition لو المستخدم استخدم اللوحتين في نفس الجلسة. instance
-// منفصلة أبسط وأضمن، وبتشارك نفس FilesetResolver (vision) تحت — صفر تحميل
-// WASM إضافي، والـmodel نفسه (نفس MODEL_URL) هيتخد من browser HTTP cache
-// في المرة التانية بدل تحميل كامل تاني.
-let poseLandmarkerImage = null;
 let visionCache = null;
 
 function setStatus(text, kind) {
@@ -201,50 +158,10 @@ async function ensureLandmarker() {
   return poseLandmarker;
 }
 
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة) — موديل "full" منفصل
-// (MODEL_URL_IMAGE، راجع تعليقه فوق) بدل "lite" بتاعة الفيديو، لإن صورة
-// واحدة مفيهاش ضغط زمني يستاهل التضحية بالدقة. minPoseDetectionConfidence/
-// minPosePresenceConfidence لسه الافتراضية بتاعة
-// PoseLandmarker (0.5 لكل واحدة، قيمة المكتبة نفسها — قسم 3.5 من الخطة:
-// الـJS API مبيرجّعش overall confidence score منفصل عن الـlandmarks
-// نفسها، فالبوابة الفعلية "بشري ولا لأ" بتحصل في VideoToAnimAutoRig.gd
-// عن طريق فحص visibility لكل landmark أساسي، مش هنا).
-async function ensureLandmarkerImage() {
-  if (poseLandmarkerImage) return poseLandmarkerImage;
-  photoSetStatus("بيجهّز…");
-  const vision = await ensureVision();
-  poseLandmarkerImage = await PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODEL_URL_IMAGE },
-    runningMode: "IMAGE",
-    numPoses: 1,
-  });
-  return poseLandmarkerImage;
-}
-
 function landmarksToDict(worldLandmarks) {
   const out = {};
   for (let i = 0; i < LANDMARK_NAMES.length && i < worldLandmarks.length; i++) {
     const lm = worldLandmarks[i];
-    out[LANDMARK_NAMES[i]] = {
-      x: Math.round(lm.x * 1e5) / 1e5,
-      y: Math.round(lm.y * 1e5) / 1e5,
-      z: Math.round(lm.z * 1e5) / 1e5,
-      visibility: Math.round((lm.visibility ?? 0) * 1e3) / 1e3,
-    };
-  }
-  return out;
-}
-
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة، قسم 3.1 من الخطة) — نفس شكل
-// landmarksToDict فوق بالظبط بس من result.landmarks (مساحة الصورة،
-// normalized 0.0-1.0 x/y + z نسبي) مش result.worldLandmarks (قسم 1 من
-// الخطة: بنستخدم x/y دول مباشرة لبناء شعاع من كاميرا Godot، مش تقدير
-// العمق التقريبي بتاع MediaPipe نفسه). visibility موجودة في نفس الحقل في
-// الاتنين.
-function landmarksToImageDict(imageLandmarks) {
-  const out = {};
-  for (let i = 0; i < LANDMARK_NAMES.length && i < imageLandmarks.length; i++) {
-    const lm = imageLandmarks[i];
     out[LANDMARK_NAMES[i]] = {
       x: Math.round(lm.x * 1e5) / 1e5,
       y: Math.round(lm.y * 1e5) / 1e5,
@@ -316,41 +233,6 @@ async function processVideo(file) {
   };
 }
 
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة، قسم 3.1-3.2 من الخطة).
-// صورة واحدة بس (مش تسلسل فريمات زي processVideo فوق) — detect() متزامنة
-// (sync)، مش detectForVideo(). الصورة المتوقعة: سكرين-شوت من الـviewport
-// الحي في Godot نفسه (راجع UI.gd._capture_photo_for_auto_rig)، مش أي صورة
-// عشوائية — القرار النهائي لزاوية الكاميرا (orthogonal/perspective،
-// إضاءة) برّه نطاق الملف ده، راجع قسم 3.2 من الخطة.
-async function processPhoto(file) {
-  const url = URL.createObjectURL(file);
-  const img = document.createElement("img");
-  img.src = url;
-
-  await new Promise((resolve, reject) => {
-    img.addEventListener("load", resolve, { once: true });
-    img.addEventListener("error", () => reject(new Error("cannot_open_image")), { once: true });
-  });
-
-  const landmarker = await ensureLandmarkerImage();
-  const result = landmarker.detect(img);
-  URL.revokeObjectURL(url);
-
-  if (!result.landmarks || result.landmarks.length === 0) {
-    return { error: "no_pose_detected" };
-  }
-
-  return {
-    mode: "photo",
-    landmarks: landmarksToImageDict(result.landmarks[0]),
-  };
-}
-
-function photoSetStatus(text, kind) {
-  photoStatusEl.textContent = text;
-  photoStatusEl.className = kind || "";
-}
-
 async function copyResult(jsonText) {
   try {
     await navigator.clipboard.writeText(jsonText);
@@ -403,51 +285,6 @@ processBtn.addEventListener("click", async () => {
 copyFallback.addEventListener("click", async () => {
   const ok = await copyResult(resultBox.value);
   setStatus(ok ? "✓ اتنسخت" : "اختار النص وانسخه يدوي", ok ? "ok" : "err");
-});
-
-// ⚠️ إضافة (سبتمبر 2026 — Auto-Rig من صورة) — نفس نمط التوصيل بالظبط زي
-// لوحة الفيديو فوق، بس لعناصر لوحة الصورة المنفصلة.
-photoInput.addEventListener("change", () => {
-  selectedPhotoFile = photoInput.files[0] || null;
-  photoProcessBtn.disabled = !selectedPhotoFile;
-  photoSetStatus(selectedPhotoFile ? "جاهز" : "اختار صورة");
-});
-
-photoProcessBtn.addEventListener("click", async () => {
-  if (!selectedPhotoFile) return;
-  photoProcessBtn.disabled = true;
-  photoInput.disabled = true;
-  photoResultBox.style.display = "none";
-  photoCopyFallback.style.display = "none";
-
-  try {
-    const result = await processPhoto(selectedPhotoFile);
-
-    if (result.error) {
-      photoSetStatus(ERROR_MESSAGES[result.error] || "حصل خطأ — جرّب تاني", "err");
-    } else {
-      const jsonText = JSON.stringify(result);
-      const copied = await copyResult(jsonText);
-      photoResultBox.value = jsonText;
-      if (copied) {
-        photoSetStatus("✓ اتنسخت — ارجع للتطبيق ودوس لصق", "ok");
-      } else {
-        photoResultBox.style.display = "block";
-        photoCopyFallback.style.display = "block";
-        photoSetStatus("دوس نسخ يدوي تحت");
-      }
-    }
-  } catch (err) {
-    photoSetStatus("حصل خطأ — جرّب تاني", "err");
-  } finally {
-    photoProcessBtn.disabled = false;
-    photoInput.disabled = false;
-  }
-});
-
-photoCopyFallback.addEventListener("click", async () => {
-  const ok = await copyResult(photoResultBox.value);
-  photoSetStatus(ok ? "✓ اتنسخت" : "اختار النص وانسخه يدوي", ok ? "ok" : "err");
 });
 </script>
 </body>
